@@ -5,8 +5,23 @@ Self-managed instances are first-class: every host `glab` is logged into is a
 host this plugin can reach.
 
 ```sh
-bb plugin install /path/to/bb-plugin-gitlab
+bb plugin install git:https://github.com/suiramdev/bb-plugin-gitlab.git@main --yes
 ```
+
+`@main` tracks the branch head. Pin a release instead to have
+`bb plugin outdated` / `bb plugin update` follow compatible tags only:
+
+```sh
+bb plugin install 'git:https://github.com/suiramdev/bb-plugin-gitlab.git@^0.1.0' --yes
+```
+
+BB clones the ref, installs production dependencies, and builds
+`dist/server.js` + `dist/app.js` itself, so nothing has to be committed built.
+`glab` on `PATH` is the only prerequisite.
+
+An id carries one source, so switching between them (git ↔ a local checkout for
+development) starts with `bb plugin remove gitlab`; the plugin's cache and
+thread links survive it.
 
 ## What it does
 
