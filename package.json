@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-gitlab",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Browse GitLab issues and merge requests in BB, then send them to agents.",
   "license": "MIT",
   "author": "Marius Nouchet (https://github.com/suiramdev)",
