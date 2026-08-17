@@ -11,14 +11,19 @@ bb plugin install /path/to/bb-plugin-gitlab
 ## What it does
 
 - **Sidebar panel** (GitLab tanuki, full width): Issues and Merge requests tabs
-  across every tracked project, with a project filter (persisted in
-  localStorage), state chips, an "Assigned to me" toggle, and a New issue form.
+  across every tracked project, one filter box that takes qualifiers —
+  `is:open`, `is:draft`, `assignee:@me`, `author:dana`, `label:"needs triage"`,
+  `project:gitlab.com/acme/web`, `no:assignee`, `no:label` — plus plain text,
+  completed from the loaded items and driven by the keyboard (↑/↓, Enter or Tab
+  to accept, Escape to dismiss). The query persists in localStorage.
 - **Issue detail**: markdown description, notes, comment box, state, assignee
   and label editing, plus "Send agent". Deep-linkable through the URL hash:
   `#/issues/<host>/<namespace/path>/<iid>`.
 - **Merge-request detail**: source → target branch, mergeability, pipeline jobs,
   approvals, reviewers, conversation notes, inline discussion threads, and
-  per-file diffs. Deep-linkable as `#/merge_requests/<host>/<namespace/path>/<iid>`.
+  per-file diffs rendered by the same syntax-highlighting engine as the rest of
+  BB, following the host's code theme. Deep-linkable as
+  `#/merge_requests/<host>/<namespace/path>/<iid>`.
 - **Send agent / Review with agent**: spawns a BB worker thread on the issue (or
   a review thread on the merge request) in the matching BB project. The item
   then shows a ⚡ pill linking to the thread.
@@ -84,9 +89,9 @@ bb plugin reload gitlab
 
 A background service refreshes the issue/MR cache every 5 minutes; the panel's
 Refresh button (or `bb gitlab sync`) forces it. The cache holds open items plus
-a page of recently closed and merged ones, so the Closed filter costs nothing.
-Detail views, mutations, and mention resolution always go live through
-`glab api`.
+a page of recently closed and merged ones, and the panel filters that cache in
+the browser, so `is:closed` or `is:merged` costs nothing. Detail views,
+mutations, and mention resolution always go live through `glab api`.
 
 ## Development
 

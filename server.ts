@@ -184,9 +184,7 @@ export const gitlabRpcContract = defineRpcContract({
       .object({
         kind: z.enum(["issue", "mr"]).optional(),
         project: projectRefSchema.optional(),
-        query: z.string().optional(),
         state: z.enum(["open", "closed"]).optional(),
-        mine: z.boolean().optional(),
       })
       .strict(),
     output: z.object({ items: z.array(itemSchema) }).strict(),
@@ -981,8 +979,6 @@ export default async function plugin(bb: BbPluginApi) {
     query?: string;
     /** "open" → opened only; "closed" → everything else (closed, merged). */
     state?: "open" | "closed";
-    /** Only items whose assignees include this username. */
-    assignee?: string;
   }): CachedItem[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -998,10 +994,6 @@ export default async function plugin(bb: BbPluginApi) {
       clauses.push("state = 'opened'");
     } else if (options.state === "closed") {
       clauses.push("state != 'opened'");
-    }
-    if (options.assignee !== undefined) {
-      clauses.push("assignees LIKE ?");
-      params.push(`%${JSON.stringify(options.assignee)}%`);
     }
     const query = options.query?.trim() ?? "";
     if (query.length > 0) {
@@ -1388,23 +1380,13 @@ export default async function plugin(bb: BbPluginApi) {
       return await syncAll(true);
     },
 
-    /** { kind?, project?, query?, state?, mine? } → cached items, newest first. */
+    /** { kind?, project?, state? } → cached items, newest first. */
     async listItems(input) {
-      const assignee =
-        input.mine === true
-          ? await getViewer(
-              input.project === undefined
-                ? undefined
-                : parseProjectRef(input.project).host,
-            )
-          : undefined;
       return {
         items: listCachedItems({
           kind: input.kind,
           project: input.project,
-          query: input.query,
           state: input.state,
-          assignee,
         }),
       };
     },

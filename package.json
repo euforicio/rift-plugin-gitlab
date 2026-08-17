@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-gitlab",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Browse GitLab issues and merge requests in BB, then send them to agents.",
   "license": "MIT",
   "author": "Marius Nouchet (https://github.com/suiramdev)",
@@ -48,6 +48,7 @@
   },
   "devDependencies": {
     "@get-bb/plugin-sdk": "0.4.6",
+    "@pierre/diffs": "^1.3.5",
     "@radix-ui/react-dialog": "^1.1.19",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",

@@ -17,7 +17,15 @@
 // project path) so subgroups of any depth work. A threadPanelAction opens
 // the same merge-request view in a thread's right panel, auto-resolved to
 // that thread's merge request.
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   definePluginApp,
   Markdown,
@@ -54,17 +62,25 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { EmptyState } from "@/components/empty-state";
 import { PageBody } from "@/components/page-body";
-import { UnifiedDiff } from "@/components/unified-diff";
+import { parsePatchFiles } from "@pierre/diffs";
+import { FileDiff } from "@pierre/diffs/react";
+import {
+  MARKER,
+  matchesItemQuery,
+  parseItemQuery,
+  QUALIFIER_KEYS,
+  queryProject,
+  suggestQueryTokens,
+  type Kind,
+  type ParsedItemQuery,
+  type QuerySuggestion,
+  type QueryVocabulary,
+} from "@/lib/item-query";
 
 // ---------------------------------------------------------------------------
 // Shapes, mirroring the rpc contract in server.ts. Declared here rather than
 // inferred so the panel's own reads are checked against the contract.
 // ---------------------------------------------------------------------------
-
-type Kind = "issue" | "mr";
-
-/** GitLab writes issue refs as #123 and merge-request refs as !123. */
-const MARKER: Record<Kind, string> = { issue: "#", mr: "!" };
 
 interface ProjectInfo {
   /** Host-qualified ref, e.g. "gitlab.com/group/subgroup/app". */
@@ -293,23 +309,15 @@ interface ItemQuery {
   kind: Kind;
   /** null = every tracked project. */
   project?: string | null;
-  /** Free text matched against title, iid, and project ref by the backend. */
-  query?: string;
   state?: "open" | "closed";
-  mine?: boolean;
 }
 
 /**
- * Cached items for one kind, filtered by the backend so the panel never holds
- * a second copy of the filter logic.
+ * Cached items for one kind. The list view filters what comes back with the
+ * panel's own query grammar; the coarse `project`/`state` arguments exist for
+ * the surfaces that only ever want one slice (homepage, merge-request picker).
  */
-function useItems({
-  kind,
-  project = null,
-  query = "",
-  state,
-  mine = false,
-}: ItemQuery): {
+function useItems({ kind, project = null, state }: ItemQuery): {
   items: Item[] | null;
   error: string | null;
   reload: () => void;
@@ -324,16 +332,14 @@ function useItems({
       .call("listItems", {
         kind,
         ...(project === null ? {} : { project }),
-        ...(query.length === 0 ? {} : { query }),
         ...(state === undefined ? {} : { state }),
-        ...(mine ? { mine: true } : {}),
       })
       .then(
         (value) => setResult({ items: value.items, error: null }),
         (error: unknown) =>
           setResult({ items: null, error: errorText(error) }),
       );
-  }, [rpc, kind, project, query, state, mine]);
+  }, [rpc, kind, project, state]);
   useEffect(() => {
     reload();
   }, [reload]);
@@ -437,16 +443,6 @@ function useItemMutations() {
     [rpc],
   );
   return { setIssueState, setAssignees, setLabels };
-}
-
-/** Keystrokes shouldn't each become an rpc call. */
-function useDebounced(value: string, delayMs: number): string {
-  const [settled, setSettled] = useState(value);
-  useEffect(() => {
-    const timer = window.setTimeout(() => setSettled(value), delayMs);
-    return () => window.clearTimeout(timer);
-  }, [value, delayMs]);
-  return settled;
 }
 
 // ---------------------------------------------------------------------------
@@ -690,120 +686,181 @@ function CommentBox({
 }
 
 // ---------------------------------------------------------------------------
-// The filter bar: project select, state chips, "Assigned to me", search.
+// The filter bar: one query box — qualifiers (`is:`, `assignee:`, `author:`,
+// `label:`, `project:`, `no:`) plus plain text — with a keyboard-driven
+// completion list built from the loaded items.
 // ---------------------------------------------------------------------------
 
-const ALL_PROJECTS = "all";
+function SuggestionIcon({ suggestion }: { suggestion: QuerySuggestion }) {
+  if (suggestion.state !== undefined) {
+    return <StateDot state={suggestion.state} draft={suggestion.draft} />;
+  }
+  if (suggestion.username !== undefined) {
+    return <Avatar username={suggestion.username} size="size-4" />;
+  }
+  return null;
+}
 
 function FilterBar({
   kind,
   projects,
-  project,
-  onProject,
-  state,
-  onState,
-  mine,
-  onMine,
-  search,
-  onSearch,
+  items,
+  value,
+  onChange,
 }: {
   kind: Kind;
   projects: ProjectInfo[];
-  project: string | null;
-  onProject: (project: string | null) => void;
-  state: "open" | "closed";
-  onState: (state: "open" | "closed") => void;
-  mine: boolean;
-  onMine: (mine: boolean) => void;
-  search: string;
-  onSearch: (search: string) => void;
+  items: Item[] | null;
+  value: string;
+  onChange: (value: string) => void;
 }) {
   const viewer = useViewer();
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listId = useId();
+  const [open, setOpen] = useState(false);
+  const [caret, setCaret] = useState(value.length);
+  const [highlight, setHighlight] = useState(0);
+
+  const vocab = useMemo<QueryVocabulary>(() => {
+    const users = new Set<string>();
+    const labels = new Set<string>();
+    for (const item of items ?? []) {
+      if (item.author.length > 0) users.add(item.author);
+      for (const username of item.assignees) users.add(username);
+      for (const label of item.labels) labels.add(label);
+    }
+    return {
+      users: [...users].sort((a, b) => a.localeCompare(b)),
+      labels: [...labels].sort((a, b) => a.localeCompare(b)),
+      projects: projects.map((entry) => entry.project),
+    };
+  }, [items, projects]);
+
+  // The token under the caret is what gets completed, so a qualifier can be
+  // fixed mid-query instead of only at the end.
+  const upToCaret = value.slice(0, caret);
+  const tokenStart = upToCaret.lastIndexOf(" ") + 1;
+  const token = upToCaret.slice(tokenStart);
+  const suggestions = useMemo(
+    () => suggestQueryTokens(token, vocab, kind, viewer).slice(0, 8),
+    [token, vocab, kind, viewer],
+  );
+  const active = Math.min(highlight, Math.max(0, suggestions.length - 1));
+
+  const accept = (suggestion: QuerySuggestion) => {
+    onChange(value.slice(0, tokenStart) + suggestion.insert + value.slice(caret));
+    const position = tokenStart + suggestion.insert.length;
+    setCaret(position);
+    setHighlight(0);
+    // The re-render owns the value, so the caret can only be placed after it.
+    requestAnimationFrame(() => {
+      inputRef.current?.focus();
+      inputRef.current?.setSelectionRange(position, position);
+    });
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Escape") {
+      setOpen(false);
+      return;
+    }
+    if (!open || suggestions.length === 0) {
+      if (event.key === "ArrowDown") setOpen(true);
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setHighlight((active + 1) % suggestions.length);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setHighlight((active - 1 + suggestions.length) % suggestions.length);
+    } else if (event.key === "Enter" || event.key === "Tab") {
+      event.preventDefault();
+      accept(suggestions[active]);
+    }
+  };
+
+  const listOpen = open && suggestions.length > 0;
   const noun = kind === "mr" ? "merge requests" : "issues";
   return (
-    <div className="flex flex-wrap items-center gap-2">
-      <Select
-        value={project ?? ALL_PROJECTS}
-        onValueChange={(value) =>
-          onProject(value === ALL_PROJECTS ? null : value)
+    <div className="relative">
+      <Input
+        ref={inputRef}
+        value={value}
+        onChange={(event) => {
+          onChange(event.target.value);
+          setOpen(true);
+          setHighlight(0);
+          setCaret(event.target.selectionStart ?? event.target.value.length);
+        }}
+        onSelect={() =>
+          setCaret(inputRef.current?.selectionStart ?? value.length)
         }
-      >
-        <SelectTrigger
-          className="h-8 w-full text-sm sm:w-64"
-          aria-label="Filter by project"
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={onKeyDown}
+        placeholder="Filter — is:open assignee:@me label:bug, or plain text"
+        aria-label={`Filter ${noun}`}
+        role="combobox"
+        aria-expanded={listOpen}
+        aria-autocomplete="list"
+        aria-controls={listOpen ? listId : undefined}
+        aria-activedescendant={listOpen ? `${listId}-${active}` : undefined}
+        className="h-9 pr-8 text-sm"
+        spellCheck={false}
+      />
+      {value.length > 0 ? (
+        <button
+          className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
+          onMouseDown={(event) => {
+            // mousedown, not click: blurring the input would close the list
+            // before the clear ever lands.
+            event.preventDefault();
+            onChange("");
+            setCaret(0);
+            inputRef.current?.focus();
+          }}
+          aria-label="Clear filter"
         >
-          <SelectValue placeholder="All projects" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value={ALL_PROJECTS}>All projects</SelectItem>
-          {projects.map((entry) => (
-            <SelectItem key={entry.project} value={entry.project}>
-              {entry.project}
-            </SelectItem>
+          ✕
+        </button>
+      ) : null}
+      {listOpen ? (
+        <div
+          id={listId}
+          role="listbox"
+          className="absolute left-0 right-0 top-full z-50 mt-1 max-h-72 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-md"
+        >
+          {suggestions.map((suggestion, index) => (
+            <button
+              key={suggestion.insert}
+              id={`${listId}-${index}`}
+              role="option"
+              aria-selected={index === active}
+              className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
+                index === active
+                  ? "bg-accent text-accent-foreground"
+                  : "text-popover-foreground"
+              }`}
+              onMouseDown={(event) => {
+                event.preventDefault();
+                accept(suggestion);
+              }}
+              onMouseEnter={() => setHighlight(index)}
+            >
+              <SuggestionIcon suggestion={suggestion} />
+              <span className="min-w-0 truncate font-medium">
+                {suggestion.label}
+              </span>
+              {suggestion.hint !== undefined ? (
+                <span className="ml-auto shrink-0 pl-4 text-xs text-muted-foreground">
+                  {suggestion.hint}
+                </span>
+              ) : null}
+            </button>
           ))}
-        </SelectContent>
-      </Select>
-
-      <div
-        className="flex items-center rounded-md border border-input p-0.5"
-        role="group"
-        aria-label="Filter by state"
-      >
-        {(["open", "closed"] as const).map((value) => (
-          <Button
-            key={value}
-            size="sm"
-            variant="ghost"
-            className="h-7 px-2.5 text-xs font-normal"
-            aria-pressed={state === value}
-            onClick={() => onState(value)}
-          >
-            <StateDot state={value === "open" ? "opened" : "closed"} />
-            {value === "open" ? "Open" : "Closed"}
-          </Button>
-        ))}
-      </div>
-
-      <Button
-        size="sm"
-        variant="ghost"
-        className="h-8 px-2.5 text-xs font-normal"
-        disabled={viewer === null}
-        aria-pressed={mine}
-        aria-label={
-          viewer === null
-            ? "Assigned to me — unavailable until the GitLab CLI reports a user"
-            : `Assigned to me (${viewer})`
-        }
-        onClick={() => onMine(!mine)}
-      >
-        Assigned to me
-      </Button>
-
-      <div className="relative min-w-40 flex-1">
-        <Input
-          value={search}
-          onChange={(event) => onSearch(event.target.value)}
-          placeholder={`Search ${noun}…`}
-          aria-label={`Search ${noun} by title, ${
-            kind === "mr" ? "!iid" : "#iid"
-          }, or project`}
-          className="h-8 pr-8 text-sm"
-          spellCheck={false}
-        />
-        {search.length > 0 ? (
-          <button
-            className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:text-foreground"
-            onMouseDown={(event) => {
-              event.preventDefault();
-              onSearch("");
-            }}
-            aria-label="Clear search"
-          >
-            ✕
-          </button>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -1073,13 +1130,13 @@ function ItemsList({
   kind,
   items,
   error,
-  filtered,
+  hasFilter,
   onOpenItem,
 }: {
   kind: Kind;
   items: Item[] | null;
   error: string | null;
-  filtered: boolean;
+  hasFilter: boolean;
   onOpenItem: (project: string, iid: number) => void;
 }) {
   const links = useLinks();
@@ -1094,8 +1151,8 @@ function ItemsList({
     body = (
       <EmptyState
         message={
-          filtered
-            ? `No ${noun} match these filters.`
+          hasFilter
+            ? `No ${noun} match this filter.`
             : `No ${noun} in the tracked projects.`
         }
       />
@@ -1707,6 +1764,112 @@ function DiscussionsSection({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Diffs. The host's code theme lives on <html> as data attributes plus the
+// `dark` class, so the panel mirrors it into @pierre/diffs and follows a live
+// theme switch instead of freezing whatever was set at mount.
+// ---------------------------------------------------------------------------
+
+interface CodeTheme {
+  dark: string;
+  light: string;
+}
+
+let hostCodeTheme: CodeTheme | null = null;
+const hostCodeThemeListeners = new Set<() => void>();
+let hostCodeThemeObserver: MutationObserver | null = null;
+
+function getHostCodeTheme(): CodeTheme {
+  hostCodeTheme ??= {
+    dark: document.documentElement.dataset.bbCodeThemeDark ?? "pierre-dark",
+    light: document.documentElement.dataset.bbCodeThemeLight ?? "pierre-light",
+  };
+  return hostCodeTheme;
+}
+
+/** One observer for the whole panel, however many diffs are mounted. */
+function subscribeHostCodeTheme(onStoreChange: () => void): () => void {
+  hostCodeThemeListeners.add(onStoreChange);
+  hostCodeThemeObserver ??= new MutationObserver(() => {
+    const current = getHostCodeTheme();
+    const next: CodeTheme = {
+      dark: document.documentElement.dataset.bbCodeThemeDark ?? "pierre-dark",
+      light: document.documentElement.dataset.bbCodeThemeLight ?? "pierre-light",
+    };
+    if (next.dark === current.dark && next.light === current.light) return;
+    hostCodeTheme = next;
+    for (const listener of hostCodeThemeListeners) listener();
+  });
+  hostCodeThemeObserver.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-bb-code-theme-dark", "data-bb-code-theme-light"],
+  });
+  return () => {
+    hostCodeThemeListeners.delete(onStoreChange);
+  };
+}
+
+function useIsDarkTheme(): boolean {
+  const [dark, setDark] = useState(() =>
+    document.documentElement.classList.contains("dark"),
+  );
+  useEffect(() => {
+    const observer = new MutationObserver(() =>
+      setDark(document.documentElement.classList.contains("dark")),
+    );
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    return () => observer.disconnect();
+  }, []);
+  return dark;
+}
+
+/**
+ * GitLab hands out bare hunks, so a `diff --git` header is synthesized for the
+ * parser. A patch it can't parse still gets shown as text rather than nothing.
+ */
+function DiffPatch({ path, patch }: { path: string; patch: string }) {
+  const dark = useIsDarkTheme();
+  const codeTheme = useSyncExternalStore(
+    subscribeHostCodeTheme,
+    getHostCodeTheme,
+    getHostCodeTheme,
+  );
+  const fileDiff = useMemo(() => {
+    const normalized = patch.replace(/\r\n/g, "\n").trimEnd();
+    if (normalized.length === 0) return null;
+    const text = normalized.startsWith("diff --git")
+      ? `${normalized}\n`
+      : `diff --git a/${path} b/${path}\n--- a/${path}\n+++ b/${path}\n${normalized}\n`;
+    try {
+      return parsePatchFiles(text)[0]?.files[0] ?? null;
+    } catch {
+      return null;
+    }
+  }, [path, patch]);
+  const options = useMemo(
+    () =>
+      ({
+        diffStyle: "unified",
+        overflow: "scroll",
+        disableFileHeader: true,
+        themeType: dark ? "dark" : "light",
+        theme: codeTheme,
+      }) as const,
+    [codeTheme, dark],
+  );
+  if (fileDiff === null) {
+    return (
+      <pre className="overflow-x-auto px-3 py-2 font-mono text-xs leading-5 text-foreground/80">
+        {patch}
+      </pre>
+    );
+  }
+  return <FileDiff fileDiff={fileDiff} options={options} />;
+}
+
 function FileDiffCard({ file, url }: { file: DiffFile; url: string }) {
   const [open, setOpen] = useState(false);
   return (
@@ -1738,7 +1901,7 @@ function FileDiffCard({ file, url }: { file: DiffFile; url: string }) {
       {open ? (
         file.patch !== null ? (
           <div className="border-t border-border">
-            <UnifiedDiff patch={file.patch} />
+            <DiffPatch path={file.path} patch={file.patch} />
           </div>
         ) : (
           <p className="border-t border-border px-3 py-2 text-xs text-muted-foreground">
@@ -2226,76 +2389,47 @@ function PanelHeader() {
   );
 }
 
-const PROJECT_FILTER_KEY = "bb-plugin-gitlab:project";
-
-function readStoredProject(): string | null {
-  try {
-    return window.localStorage.getItem(PROJECT_FILTER_KEY);
-  } catch {
-    return null;
-  }
-}
+const QUERY_KEY = "bb-plugin-gitlab:query";
+const DEFAULT_QUERY = "is:open ";
 
 function ListView({
   kind,
   projects,
+  query,
+  onQuery,
   onOpenItem,
 }: {
   kind: Kind;
   projects: ProjectInfo[];
+  query: string;
+  onQuery: (query: string) => void;
   onOpenItem: (project: string, iid: number) => void;
 }) {
-  const [project, setProjectState] = useState<string | null>(readStoredProject);
-  const [state, setState] = useState<"open" | "closed">("open");
-  const [mine, setMine] = useState(false);
-  const [search, setSearch] = useState("");
-  const query = useDebounced(search, 250);
-
-  const setProject = useCallback((next: string | null) => {
-    setProjectState(next);
-    try {
-      if (next === null) window.localStorage.removeItem(PROJECT_FILTER_KEY);
-      else window.localStorage.setItem(PROJECT_FILTER_KEY, next);
-    } catch {
-      // private mode / storage disabled — the filter just won't persist
-    }
-  }, []);
-
-  // A remembered project that no longer exists would filter everything out.
-  const effectiveProject =
-    project !== null && projects.some((entry) => entry.project === project)
-      ? project
-      : null;
-
-  const { items, error } = useItems({
-    kind,
-    project: effectiveProject,
-    query,
-    state,
-    mine,
-  });
+  const { items, error } = useItems({ kind });
+  const viewer = useViewer();
+  const parsed = useMemo(() => parseItemQuery(query), [query]);
+  const filtered = useMemo(
+    () =>
+      items === null
+        ? null
+        : items.filter((item) => matchesItemQuery(item, parsed, viewer)),
+    [items, parsed, viewer],
+  );
 
   return (
     <>
       <FilterBar
         kind={kind}
         projects={projects}
-        project={effectiveProject}
-        onProject={setProject}
-        state={state}
-        onState={setState}
-        mine={mine}
-        onMine={setMine}
-        search={search}
-        onSearch={setSearch}
+        items={items}
+        value={query}
+        onChange={onQuery}
       />
       <ItemsList
         kind={kind}
-        items={items}
+        items={filtered}
         error={error}
-        filtered={
-          effectiveProject !== null || mine || query.length > 0 || state !== "open"
-        }
+        hasFilter={query.trim().length > 0}
         onOpenItem={onOpenItem}
       />
     </>
@@ -2334,17 +2468,27 @@ function GitlabPanelBody({
   route,
   navigate,
   status,
+  query,
+  onQuery,
 }: {
   route: Route;
   navigate: (route: Route) => void;
   status: Status | null;
+  query: string;
+  onQuery: (query: string) => void;
 }) {
   return (
     <>
       {status !== null && !status.glabOk ? (
         <StatusBanner error={status.glabError} />
       ) : null}
-      <GitlabRoutedBody route={route} navigate={navigate} status={status} />
+      <GitlabRoutedBody
+        route={route}
+        navigate={navigate}
+        status={status}
+        query={query}
+        onQuery={onQuery}
+      />
     </>
   );
 }
@@ -2353,11 +2497,16 @@ function GitlabRoutedBody({
   route,
   navigate,
   status,
+  query,
+  onQuery,
 }: {
   route: Route;
   navigate: (route: Route) => void;
   status: Status | null;
+  query: string;
+  onQuery: (query: string) => void;
 }) {
+  const projects = status?.projects ?? [];
   if (status !== null && status.projects.length === 0) {
     return (
       <EmptyState message="No GitLab projects tracked yet. Create a BB project whose checkout has a GitLab origin remote, or add projects via the extraProjects plugin setting." />
@@ -2385,8 +2534,11 @@ function GitlabRoutedBody({
   if (route.view === "new") {
     return (
       <NewIssueForm
-        projects={status?.projects ?? []}
-        defaultProject={readStoredProject()}
+        projects={projects}
+        defaultProject={queryProject(
+          parseItemQuery(query),
+          projects.map((entry) => entry.project),
+        )}
         onCreated={(project, iid) =>
           navigate(
             iid !== null
@@ -2428,7 +2580,9 @@ function GitlabRoutedBody({
 
       <ListView
         kind={kind}
-        projects={status?.projects ?? []}
+        projects={projects}
+        query={query}
+        onQuery={onQuery}
         onOpenItem={(project, iid) =>
           navigate(
             kind === "mr"
@@ -2444,10 +2598,31 @@ function GitlabRoutedBody({
 function GitlabPanel({ subPath }: PluginNavPanelProps) {
   const [route, navigate] = useSubPathRoute(subPath);
   const status = useStatus();
+  const [query, setQueryState] = useState(() => {
+    try {
+      return window.localStorage.getItem(QUERY_KEY) ?? DEFAULT_QUERY;
+    } catch {
+      return DEFAULT_QUERY;
+    }
+  });
+  const setQuery = useCallback((next: string) => {
+    setQueryState(next);
+    try {
+      window.localStorage.setItem(QUERY_KEY, next);
+    } catch {
+      // private mode / storage disabled — the filter just won't persist
+    }
+  }, []);
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-3 sm:p-4 md:p-5">
       <PageBody className="max-w-5xl">
-        <GitlabPanelBody route={route} navigate={navigate} status={status} />
+        <GitlabPanelBody
+          route={route}
+          navigate={navigate}
+          status={status}
+          query={query}
+          onQuery={setQuery}
+        />
       </PageBody>
     </div>
   );
