@@ -32,7 +32,6 @@ import {
   useBbNavigate,
   useRealtime,
   useRpc,
-  type PluginHomepageSectionProps,
   type PluginNavPanelProps,
   type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
@@ -2633,90 +2632,6 @@ function GitlabPanel({ subPath }: PluginNavPanelProps) {
 // when that project has a GitLab remote.
 // ---------------------------------------------------------------------------
 
-const HOMEPAGE_ROWS = 5;
-
-function RecentIssuesSection({ projectId }: PluginHomepageSectionProps) {
-  const navigate = useBbNavigate();
-  const status = useStatus();
-  const { spawn, spawningKey } = useSpawn();
-  // A homepage project with no GitLab remote (and the no-project case) shows
-  // every tracked project's issues rather than an accidental match on null.
-  const scoped =
-    projectId === null
-      ? null
-      : (status?.projects.find((entry) => entry.bbProjectId === projectId)
-          ?.project ?? null);
-  const { items, error } = useItems({
-    kind: "issue",
-    project: scoped,
-    state: "open",
-  });
-
-  if (error !== null) return <EmptyState message={error} />;
-  if (items === null) {
-    return (
-      <div className="flex flex-col gap-2">
-        <Skeleton className="h-5 w-full" />
-        <Skeleton className="h-5 w-5/6" />
-        <Skeleton className="h-5 w-2/3" />
-      </div>
-    );
-  }
-  if (items.length === 0) {
-    return <EmptyState message="No open GitLab issues." className="py-6" />;
-  }
-  return (
-    <div className="overflow-hidden rounded-lg border border-border bg-card">
-      <div className="divide-y divide-border">
-        {items.slice(0, HOMEPAGE_ROWS).map((item) => (
-          <div
-            key={linkKey("issue", item.project, item.iid)}
-            className="flex items-center gap-2 px-3 py-2"
-          >
-            <StateDot state={item.state} />
-            <button
-              className="flex min-w-0 flex-1 items-center gap-2 text-left"
-              onClick={() =>
-                navigate.toPluginPanel(PANEL_PATH, {
-                  subPath: routeToSubPath({
-                    view: "issue",
-                    project: item.project,
-                    iid: item.iid,
-                  }),
-                })
-              }
-            >
-              <span className="shrink-0 font-mono text-xs text-muted-foreground">
-                #{item.iid}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-sm text-foreground">
-                {item.title}
-              </span>
-              <span
-                className="hidden shrink-0 text-xs text-muted-foreground sm:block"
-                title={item.project}
-              >
-                {shortProject(item.project)}
-              </span>
-            </button>
-            <Button
-              size="sm"
-              variant="outline"
-              className="h-7 shrink-0"
-              disabled={spawningKey !== null}
-              aria-label={`Send agent to issue #${item.iid}`}
-              onClick={() => spawn("issue", item.project, item.iid)}
-            >
-              {spawningKey === linkKey("issue", item.project, item.iid)
-                ? "…"
-                : "Send agent"}
-            </Button>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
 
 export default definePluginApp((app) => {
   app.slots.navPanel({
@@ -2726,11 +2641,6 @@ export default definePluginApp((app) => {
     path: PANEL_PATH,
     component: GitlabPanel,
     headerContent: PanelHeader,
-  });
-  app.slots.homepageSection({
-    id: "gitlab-issues",
-    title: "GitLab issues",
-    component: RecentIssuesSection,
   });
   app.slots.threadPanelAction({
     id: "merge-request",
