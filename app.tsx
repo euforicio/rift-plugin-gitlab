@@ -1,4 +1,4 @@
-// bb-plugin-gitlab — the frontend bundle.
+// rift-plugin-gitlab — the frontend bundle.
 //
 // A GitLab panel: Issues / Merge requests as a filterable list (project
 // filter, Open/Closed chips, "Assigned to me", text search — all pushed to
@@ -29,12 +29,12 @@ import {
 import {
   definePluginApp,
   Markdown,
-  useBbNavigate,
+  useRiftNavigate,
   useRealtime,
   useRpc,
   type PluginNavPanelProps,
   type PluginThreadPanelProps,
-} from "@get-bb/plugin-sdk/app";
+} from "@riftlabs/plugin-sdk/app";
 import { toast } from "sonner";
 import type { gitlabRpcContract } from "./server";
 import { Badge } from "@/components/ui/badge";
@@ -289,7 +289,7 @@ function routeToSubPath(route: Route): string {
 }
 
 function useSubPathRoute(subPath: string): [Route, (route: Route) => void] {
-  const bbNavigate = useBbNavigate();
+  const bbNavigate = useRiftNavigate();
   const route = useMemo(() => parseSubPath(subPath), [subPath]);
   const navigate = useCallback(
     (next: Route) => {
@@ -383,7 +383,7 @@ function useSpawn(): {
   spawningKey: string | null;
 } {
   const rpc = useRpc<typeof gitlabRpcContract>();
-  const navigate = useBbNavigate();
+  const navigate = useRiftNavigate();
   const [spawningKey, setSpawningKey] = useState<string | null>(null);
   const spawn = useCallback(
     (kind: Kind, project: string, iid: number) => {
@@ -560,7 +560,7 @@ function StateBadge({ state, draft }: { state: string; draft?: boolean }) {
 }
 
 function ThreadPills({ links }: { links: ThreadLink[] | undefined }) {
-  const navigate = useBbNavigate();
+  const navigate = useRiftNavigate();
   if (links === undefined || links.length === 0) return null;
   return (
     <span className="flex shrink-0 items-center gap-1">
@@ -1801,7 +1801,7 @@ function subscribeHostCodeTheme(onStoreChange: () => void): () => void {
   });
   hostCodeThemeObserver.observe(document.documentElement, {
     attributes: true,
-    attributeFilter: ["data-bb-code-theme-dark", "data-bb-code-theme-light"],
+    attributeFilter: ["data-rift-code-theme-dark", "data-rift-code-theme-light"],
   });
   return () => {
     hostCodeThemeListeners.delete(onStoreChange);
@@ -2388,7 +2388,7 @@ function PanelHeader() {
   );
 }
 
-const QUERY_KEY = "bb-plugin-gitlab:query";
+const QUERY_KEY = "rift-plugin-gitlab:query";
 const DEFAULT_QUERY = "is:open ";
 
 function ListView({

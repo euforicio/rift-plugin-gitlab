@@ -1,6 +1,6 @@
 # bb-plugin-gitlab
 
-GitLab issues and merge requests inside BB, with one-click agent dispatch.
+GitLab issues and merge requests inside Rift, with one-click agent dispatch.
 Self-managed instances are first-class: every host `glab` is logged into is a
 host this plugin can reach.
 
@@ -15,7 +15,7 @@ bb plugin install git:https://github.com/suiramdev/bb-plugin-gitlab.git@main --y
 bb plugin install 'git:https://github.com/suiramdev/bb-plugin-gitlab.git@^0.1.0' --yes
 ```
 
-BB clones the ref, installs production dependencies, and builds
+Rift clones the ref, installs production dependencies, and builds
 `dist/server.js` + `dist/app.js` itself, so nothing has to be committed built.
 `glab` on `PATH` is the only prerequisite.
 
@@ -37,10 +37,10 @@ thread links survive it.
 - **Merge-request detail**: source → target branch, mergeability, pipeline jobs,
   approvals, reviewers, conversation notes, inline discussion threads, and
   per-file diffs rendered by the same syntax-highlighting engine as the rest of
-  BB, following the host's code theme. Deep-linkable as
+  Rift, following the host's code theme. Deep-linkable as
   `#/merge_requests/<host>/<namespace/path>/<iid>`.
-- **Send agent / Review with agent**: spawns a BB worker thread on the issue (or
-  a review thread on the merge request) in the matching BB project. The item
+- **Send agent / Review with agent**: spawns a Rift worker thread on the issue (or
+  a review thread on the merge request) in the matching Rift project. The item
   then shows a ⚡ pill linking to the thread.
 - **Homepage section**: recent open issues with the same Send agent buttons.
 - **Mentions**: `#` completes GitLab issues, `!` completes merge requests (`@`
@@ -85,16 +85,16 @@ A project is addressed by its **host-qualified ref**:
 `gitlab.example.dev/group/subgroup/app`. The host is the first segment; the rest
 is the namespace path, which may have any number of segments.
 
-- Every BB project whose git remote points at an authenticated GitLab host —
+- Every Rift project whose git remote points at an authenticated GitLab host —
   including remotes that use that host's `ssh_host`, `api_host`, or subfolder
-  form. That mapping is also how "Send agent" picks the BB project to spawn in.
-  The remote comes from BB's own project record, so a checkout on an enrolled
+  form. That mapping is also how "Send agent" picks the Rift project to spawn in.
+  The remote comes from Rift's own project record, so a checkout on an enrolled
   remote host resolves exactly like a local one. A remote on a GitLab host glab
   is not logged into is reported in `bb plugin logs gitlab`.
 - Plus the `extraProjects` setting: a comma-separated list of refs, normalized
   for you — a scheme, mixed case, a port, a subfolder, or a trailing slash are
   all accepted, and a bare `group/app` uses `defaultHost`.
-- `defaultProject`: where threads spawn for GitLab projects with no BB project.
+- `defaultProject`: where threads spawn for GitLab projects with no Rift project.
 
 ```sh
 bb plugin config gitlab set extraProjects "https://Code.Example.dev:8443/gitlab/group/app, other/app"

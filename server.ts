@@ -1,4 +1,4 @@
-// bb-plugin-gitlab — GitLab issues & merge requests inside BB.
+// rift-plugin-gitlab — GitLab issues & merge requests inside BB.
 //
 // Auth rides on the GitLab CLI: every host `glab auth status` reports as
 // logged in is a host this plugin can reach, so self-managed instances work
@@ -14,7 +14,7 @@
 // — because a GitLab path has any number of namespace segments and the same
 // path can exist on two instances.
 import { execFile } from "node:child_process";
-import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
+import { defineRpcContract, type RiftPluginApi } from "@riftlabs/plugin-sdk";
 import { z } from "zod";
 
 const SYNC_INTERVAL_MS = 5 * 60_000;
@@ -29,7 +29,7 @@ const MAX_PATCH_BYTES = 20_000;
 
 const GLAB_HINT =
   "Install the GitLab CLI (https://gitlab.com/gitlab-org/cli) and run " +
-  "`glab auth login`, then `bb plugin reload gitlab`.";
+  "`glab auth login`, then `rift plugin reload gitlab`.";
 
 /**
  * "host/group/sub/project" — the host glab knows the instance by, then a path
@@ -749,8 +749,8 @@ function run(
   return promise;
 }
 
-export default async function plugin(bb: BbPluginApi) {
-  const settings = bb.settings.define({
+export default async function plugin(rift: RiftPluginApi) {
+  const settings = rift.settings.define({
     extraProjects: {
       type: "string",
       label: "Extra projects",
@@ -891,7 +891,7 @@ export default async function plugin(bb: BbPluginApi) {
       byRef.set(ref, { project: ref, host, path, bbProjectId });
     };
     try {
-      for (const bbProject of await bb.sdk.projects.list()) {
+      for (const bbProject of await rift.sdk.projects.list()) {
         if (bbProject.gitRemoteUrl === null) continue;
         const ref = parseGitlabRemote(bbProject.gitRemoteUrl, authenticatedHosts);
         if (ref !== null) {
@@ -905,13 +905,13 @@ export default async function plugin(bb: BbPluginApi) {
           /^(?:[a-z][a-z0-9+.-]*:\/\/)?(?:[^@/\s]+@)?([^:/\s]+)/i,
         );
         if (remoteHost !== null) {
-          bb.log.debug(
+          rift.log.debug(
             `project ${bbProject.id} remote host ${remoteHost[1]} is not an authenticated glab host`,
           );
         }
       }
     } catch (error) {
-      bb.log.warn(
+      rift.log.warn(
         `project discovery failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
@@ -922,7 +922,7 @@ export default async function plugin(bb: BbPluginApi) {
       if (raw.trim().length === 0) continue;
       const ref = normalizeProjectRef(raw, authenticatedHosts, defaultHost);
       if (ref !== null) addRef(ref, null);
-      else bb.log.warn(`ignoring malformed extraProjects entry "${raw}"`);
+      else rift.log.warn(`ignoring malformed extraProjects entry "${raw}"`);
     }
     const projects = [...byRef.values()];
     projectCache = { projects, fetchedAt: Date.now() };
@@ -932,8 +932,8 @@ export default async function plugin(bb: BbPluginApi) {
   // ------------------------------------------------------------------
   // SQLite cache of open issues + merge requests across tracked projects.
   // ------------------------------------------------------------------
-  const db = bb.storage.database();
-  bb.storage.migrate(db, [
+  const db = rift.storage.database();
+  rift.storage.migrate(db, [
     `CREATE TABLE IF NOT EXISTS items (
        project TEXT NOT NULL,
        iid INTEGER NOT NULL,
@@ -1070,7 +1070,7 @@ export default async function plugin(bb: BbPluginApi) {
         "UPDATE items SET labels = ? WHERE project = ? AND kind = ? AND iid = ?",
       ).run(JSON.stringify(patch.labels), project, kind, iid);
     }
-    bb.realtime.publish("data-changed", {});
+    rift.realtime.publish("data-changed", {});
   }
 
   async function syncAll(
@@ -1100,22 +1100,22 @@ export default async function plugin(bb: BbPluginApi) {
         replaceProjectRows(project, items);
         total += items.length;
       } catch (error) {
-        bb.log.warn(
+        rift.log.warn(
           `sync failed for ${project}: ${
             error instanceof Error ? error.message : String(error)
           }`,
         );
       }
     }
-    await bb.storage.kv.set("sync-cursor", {
+    await rift.storage.kv.set("sync-cursor", {
       lastSyncedAt: new Date().toISOString(),
       projects: projects.length,
       items: total,
     });
     if (before !== JSON.stringify(fingerprint.all())) {
-      bb.realtime.publish("data-changed", { items: total });
+      rift.realtime.publish("data-changed", { items: total });
     }
-    bb.log.info(`synced ${total} item(s) across ${projects.length} project(s)`);
+    rift.log.info(`synced ${total} item(s) across ${projects.length} project(s)`);
     return { projects: projects.length, items: total };
   }
 
@@ -1125,7 +1125,7 @@ export default async function plugin(bb: BbPluginApi) {
   // an abort that lands mid-sync would otherwise register its listener on an
   // already-aborted signal, which never fires, and the reload would wait out
   // the full interval and report the plugin degraded.
-  bb.background.service("sync", {
+  rift.background.service("sync", {
     async start(signal) {
       while (!signal.aborted) {
         await syncAll();
@@ -1150,7 +1150,7 @@ export default async function plugin(bb: BbPluginApi) {
   try {
     await checkAuth();
   } catch (error) {
-    bb.status.needsConfiguration(
+    rift.status.needsConfiguration(
       error instanceof Error ? error.message : String(error),
     );
   }
@@ -1161,16 +1161,16 @@ export default async function plugin(bb: BbPluginApi) {
   // ------------------------------------------------------------------
   async function addLink(link: ThreadLink): Promise<void> {
     const key = `link:${link.kind}:${link.project}!${link.iid}`;
-    const existing = (await bb.storage.kv.get<ThreadLink[]>(key)) ?? [];
-    await bb.storage.kv.set(key, [...existing, link]);
-    bb.realtime.publish("links-changed", { key });
+    const existing = (await rift.storage.kv.get<ThreadLink[]>(key)) ?? [];
+    await rift.storage.kv.set(key, [...existing, link]);
+    rift.realtime.publish("links-changed", { key });
   }
 
   async function listAllLinks(): Promise<Record<string, ThreadLink[]>> {
-    const keys = await bb.storage.kv.list("link:");
+    const keys = await rift.storage.kv.list("link:");
     const result: Record<string, ThreadLink[]> = {};
     for (const key of keys) {
-      const links = await bb.storage.kv.get<ThreadLink[]>(key);
+      const links = await rift.storage.kv.get<ThreadLink[]>(key);
       if (links !== undefined && links.length > 0) {
         result[key.slice("link:".length)] = links;
       }
@@ -1230,7 +1230,7 @@ export default async function plugin(bb: BbPluginApi) {
               "Summarize your findings with file/line references. Do not push " +
               "changes or post to GitLab unless asked.",
           ].join("\n");
-    const thread = await bb.sdk.threads.spawn({
+    const thread = await rift.sdk.threads.spawn({
       projectId: bbProjectId,
       environment: { type: "project-default" },
       title: `${ref}: ${title}`.slice(0, 120),
@@ -1243,7 +1243,7 @@ export default async function plugin(bb: BbPluginApi) {
       threadId: thread.id,
       createdAt: new Date().toISOString(),
     });
-    bb.log.info(`spawned thread ${thread.id} for ${noun} ${ref}`);
+    rift.log.info(`spawned thread ${thread.id} for ${noun} ${ref}`);
     return { threadId: thread.id };
   }
 
@@ -1358,10 +1358,10 @@ export default async function plugin(bb: BbPluginApi) {
   // ------------------------------------------------------------------
   // rpc — the frontend data plane.
   // ------------------------------------------------------------------
-  bb.rpc.register(gitlabRpcContract, {
+  rift.rpc.register(gitlabRpcContract, {
     /** () → auth/sync status for the panel banner. */
     async status() {
-      const cursor = await bb.storage.kv.get<{
+      const cursor = await rift.storage.kv.get<{
         lastSyncedAt: string;
         projects: number;
         items: number;
@@ -1516,7 +1516,7 @@ export default async function plugin(bb: BbPluginApi) {
         try {
           return await gitlabApi(project, endpoint);
         } catch (error) {
-          bb.log.warn(
+          rift.log.warn(
             `optional call ${endpoint} failed: ${
               error instanceof Error ? error.message : String(error)
             }`,
@@ -1703,7 +1703,7 @@ export default async function plugin(bb: BbPluginApi) {
           input.project,
           await fetchProjectItems(gitlabApi, input.project),
         );
-        bb.realtime.publish("data-changed", {});
+        rift.realtime.publish("data-changed", {});
       } catch {
         // creation succeeded; the next scheduled sync will pick it up
       }
@@ -1727,9 +1727,9 @@ export default async function plugin(bb: BbPluginApi) {
      */
     async mergeRequestForThread({ threadId }) {
       try {
-        const thread = await bb.sdk.threads.get({ threadId });
+        const thread = await rift.sdk.threads.get({ threadId });
         if (thread.environmentId !== null) {
-          const result = await bb.sdk.environments.pullRequest({
+          const result = await rift.sdk.environments.pullRequest({
             environmentId: thread.environmentId,
           });
           const match =
@@ -1838,7 +1838,7 @@ export default async function plugin(bb: BbPluginApi) {
     }
   }
 
-  bb.ui.registerMentionProvider({
+  rift.ui.registerMentionProvider({
     id: "issue",
     label: "GitLab issues",
     triggers: ["@", "#"],
@@ -1850,7 +1850,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
   });
 
-  bb.ui.registerMentionProvider({
+  rift.ui.registerMentionProvider({
     id: "mr",
     label: "GitLab merge requests",
     triggers: ["@", "!"],
@@ -1863,41 +1863,41 @@ export default async function plugin(bb: BbPluginApi) {
   });
 
   // ------------------------------------------------------------------
-  // CLI: `bb gitlab …` for agents and terminals.
+  // CLI: `rift gitlab …` for agents and terminals.
   // ------------------------------------------------------------------
   const USAGE = [
     "Usage:",
-    "  bb gitlab projects           List tracked GitLab projects",
-    "  bb gitlab issues [project]   List cached open issues",
-    "  bb gitlab mrs [project]      List cached open merge requests",
-    "  bb gitlab sync               Refresh the cache from GitLab now",
+    "  rift gitlab projects           List tracked GitLab projects",
+    "  rift gitlab issues [project]   List cached open issues",
+    "  rift gitlab mrs [project]      List cached open merge requests",
+    "  rift gitlab sync               Refresh the cache from GitLab now",
     "",
     "A project is written host-qualified: gitlab.com/group/subgroup/app",
   ].join("\n");
 
-  bb.cli.register({
+  rift.cli.register({
     name: "gitlab",
     summary: "Browse tracked GitLab projects, issues, and merge requests",
     commands: [
       {
         name: "projects",
         summary: "List tracked GitLab projects",
-        usage: "bb gitlab projects",
+        usage: "rift gitlab projects",
       },
       {
         name: "issues",
         summary: "List cached open issues",
-        usage: "bb gitlab issues [host/group/project]",
+        usage: "rift gitlab issues [host/group/project]",
       },
       {
         name: "mrs",
         summary: "List cached open merge requests",
-        usage: "bb gitlab mrs [host/group/project]",
+        usage: "rift gitlab mrs [host/group/project]",
       },
       {
         name: "sync",
         summary: "Refresh the cache from GitLab now",
-        usage: "bb gitlab sync",
+        usage: "rift gitlab sync",
       },
     ],
     async run(argv) {
@@ -1943,7 +1943,7 @@ export default async function plugin(bb: BbPluginApi) {
           if (items.length === 0) {
             return {
               exitCode: 0,
-              stdout: "Nothing cached. Run `bb gitlab sync` first.",
+              stdout: "Nothing cached. Run `rift gitlab sync` first.",
             };
           }
           return {
